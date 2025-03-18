@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sequenciador de Áudio Pro</title>
+    <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
+    <script src="https://unpkg.com/wavesurfer.js@7/dist/plugins/regions.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@magenta/music@^1.23.0"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+
+        h1,
+        h2 {
+            color: #333;
+            margin: 0 0 10px 0;
+        }
+
+        .instrument-controls,
+        .instrument,
+        .remastering-room,
+        .work-list {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        .instrument-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .instrument:hover {
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .record-indicator {
+            width: 15px;
+            height: 15px;
+            background-color: red;
+            border-radius: 50%;
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            display: none;
+        }
+
+        .recording .record-indicator {
+            display: block;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0;
+            }
+
+            100% {
+                opacity: 1;
+            }
+        }
+
+        button {
+            padding: 8px 16px;
+            margin: 5px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: transform 0.2s;
+        }
+
+        button:hover {
+            transform: scale(1.05);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .record-btn {
+            background-color: #ff4444;
+            color: white;
+        }
+
+        .play-btn {
+            background-color: #44ff44;
+        }
+
+        .stop-btn {
+            background-color: #ff9900;
+        }
+
+        .edit-btn,
+        .clean-btn,
+        .reset-btn {
+            background-color: #008CBA;
+            color: white;
+        }
+
+        .delete-btn {
+            background-color: #d9534f;
+            color: white;
+        }
+
+        .ai-btn {
+            background-color: #ff00ff;
+            color: white;
+        }
+
+        .waveform {
+            border: 1px solid #ccc;
+            margin: 10px 0;
+            height: 120px;
+        }
+
+        .track-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+
+        .volume-control {
+            margin: 10px 0;
+        }
+
+        #remastering-waveform {
+            height: 150px;
+            margin: 10px 0;
+        }
+
+        #status-text {
+            font-size: 16px;
+            margin: 10px 0;
+            color: #555;
+        }
+
+        .work-list ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .work-list li {
+            margin: 10px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="instrument-controls">
+        <h1>Sequenciador de Áudio Pro</h1>
+        <button class="add-track-btn" onclick="addNewTrack()">Adicionar Pista</button>
+        <button class="play-all-btn" onclick="playAllTracks()">Tocar Todas</button>
+        <button class="stop-all-btn stop-btn" onclick="stopAllTracks()">Parar Todas</button>
+        <button class="reset-btn" onclick="resetSequencer()">Resetar</button>
+        <button class="ai-btn" onclick="openRemasteringRoom()">Abrir Sala de Remasterização</button>
+        <button onclick="importAudio()">Importar Áudio</button>
+        <button onclick="exportAudio()">Exportar Áudio</button>
+    </div>
+    <div id="instruments-container"></div>
+    <input type="file" id="audio-input" accept="audio/*" style="display:none" onchange="handleImport(event)">
+
+    <div id="remastering-room" class="remastering-room" style="display: none;">
+        <h2>Sala de Remasterização com IA</h2>
+        <div id="remastering-waveform"></div>
+        <button class="play-btn" onclick="playPreview()">Tocar Prévia</button>
+        <button class="stop-btn" onclick="stopPreview()">Parar Prévia</button>
+        <button class="ai-btn" onclick="remasterWithAI()">Remasterizar com IA</button>
+        <button class="clean-btn" onclick="cleanRemasteringRoom()">Limpar</button>
+        <p id="status-text">Status: Aguardando ação</p>
+    </div>
+
+    <div class="work-list">
+        <h2>Lista de Trabalhos</h2>
+        <ul id="work-list"></ul>
+    </div>
+
+    <script>
+        const { ipcRenderer } = require('electron');
+
+        let trackCount = 0;
+        let tracks = {};
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        let remasteringWavesurfer = null;
+        let previewBlob = null;
+        let workList = [];
+
+        class AudioTrack {
+            constructor(id) {
+                this.id = id;
+                this.wavesurfer = null;
+                this.audioBlob = null;
+                this.mediaRecorder = null;
+                this.audioUrl = null;
+                this.isPlaying = false;
+                this.volume = 1.0;
+            }
+        }
+
+        function addNewTrack() {
+            trackCount++;
+            const trackId = trackCount;
+            const track = new AudioTrack(trackId);
+            tracks[trackId] = track;
+
+            const container = document.getElementById('instruments-container');
+            const newTrack = document.createElement('div');
+            newTrack.className = 'instrument';
+            newTrack.setAttribute('data-track-id', trackId);
+            newTrack.innerHTML = `
+                <h2>Pista ${trackId}</h2>
+                <div class="record-indicator"></div>
+                <div class="track-controls">
+                    <button class="record-btn" onclick="startRecording(${trackId})">Gravar</button>
+                    <button class="stop-btn" onclick="stopRecording(${trackId})">Parar Gravação</button>
+                    <button class="play-btn" onclick="playRecordedAudio(${trackId})">Reproduzir</button>
+                    <button class="stop-btn" onclick="stopPlayback(${trackId})">Parar</button>
+                    <button class="delete-btn" onclick="deleteTrack(${trackId})">Apagar</button>
+                </div>
+                <div class="volume-control">
+                    <label>Volume: </label>
+                    <input type="range" min="0" max="1" step="0.1" value="1" onchange="adjustVolume(${trackId}, this.value)">
+                </div>
+                <div class="waveform" id="waveform${trackId}"></div>
+            `;
+            container.appendChild(newTrack);
+
+            track.wavesurfer = WaveSurfer.create({
+                container: `#waveform${trackId}`,
+                waveColor: 'violet',
+                progressColor: 'purple',
+                height: 120,
+                cursorColor: 'navy',
+                barWidth: 2,
+                normalize: true,
+                audioContext: audioContext
+            });
+
+            track.wavesurfer.on('finish', () => {
+                track.isPlaying = false;
+            });
+
+            return track;
+        }
+
+        async function startRecording(trackId) {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const mediaRecorder = new MediaRecorder(stream);
+                const chunks = [];
+
+                mediaRecorder.ondataavailable = event => chunks.push(event.data);
+                mediaRecorder.onstop = () => {
+                    const audioBlob = new Blob(chunks, { type: 'audio/wav' });
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    tracks[trackId].audioBlob = audioBlob;
+                    tracks[trackId].audioUrl = audioUrl;
+                    tracks[trackId].wavesurfer.load(audioUrl);
+                    document.querySelector(`[data-track-id="${trackId}"]`).classList.remove('recording');
+                    stream.getTracks().forEach(track => track.stop());
+                    addToWorkList(`Gravação Pista ${trackId}`, audioBlob);
+                };
+
+                mediaRecorder.onerror = (err) => console.error('Erro na gravação:', err);
+                mediaRecorder.start();
+                tracks[trackId].mediaRecorder = mediaRecorder;
+                document.querySelector(`[data-track-id="${trackId}"]`).classList.add('recording');
+            } catch (err) {
+                console.error('Erro ao acessar microfone:', err);
+                alert('Não foi possível acessar o microfone. Verifique as permissões.');
+            }
+        }
+
+        function stopRecording(trackId) {
+            if (tracks[trackId].mediaRecorder && tracks[trackId].mediaRecorder.state !== 'inactive') {
+                tracks[trackId].mediaRecorder.stop();
+            }
+        }
+
+        function playRecordedAudio(trackId) {
+            if (tracks[trackId].audioUrl) {
+                tracks[trackId].wavesurfer.play();
+                tracks[trackId].isPlaying = true;
+            }
+        }
+
+        function stopPlayback(trackId) {
+            if (tracks[trackId].wavesurfer) {
+                tracks[trackId].wavesurfer.stop();
+                tracks[trackId].isPlaying = false;
+            }
+        }
+
+        function adjustVolume(trackId, volume) {
+            if (tracks[trackId].wavesurfer) {
+                tracks[trackId].wavesurfer.setVolume(volume);
+                tracks[trackId].volume = volume;
+            }
+        }
+
+        function playAllTracks() {
+            Object.values(tracks).forEach(track => {
+                if (track.audioUrl && !track.isPlaying) {
+                    track.wavesurfer.play();
+                    track.isPlaying = true;
+                }
+            });
+        }
+
+        function stopAllTracks() {
+            Object.values(tracks).forEach(track => {
+                if (track.wavesurfer) {
+                    track.wavesurfer.stop();
+                    track.isPlaying = false;
+                }
+            });
+        }
+
+        function deleteTrack(trackId) {
+            if (tracks[trackId].wavesurfer) {
+                tracks[trackId].wavesurfer.destroy();
+            }
+            if (tracks[trackId].audioUrl) {
+                URL.revokeObjectURL(tracks[trackId].audioUrl);
+            }
+            document.querySelector(`[data-track-id="${trackId}"]`).remove();
+            delete tracks[trackId];
+        }
+
+        function resetSequencer() {
+            stopAllTracks();
+            Object.values(tracks).forEach(track => {
+                if (track.audioUrl) {
+                    URL.revokeObjectURL(track.audioUrl);
+                }
+                if (track.wavesurfer) {
+                    track.wavesurfer.destroy();
+                }
+            });
+            document.getElementById('instruments-container').innerHTML = '';
+            tracks = {};
+            trackCount = 0;
+            closeRemasteringRoom();
+            workList = [];
+            updateWorkList();
+        }
+
+        function importAudio() {
+            document.getElementById('audio-input').click();
+        }
+
+        function handleImport(event) {
+            const file = event.target.files[0];
+            if (file) {
+                const url = URL.createObjectURL(file);
+                const track = addNewTrack();
+                track.audioBlob = file;
+                track.wavesurfer.load(url);
+                addToWorkList(`Importação Pista ${track.id}`, file);
+            }
+        }
+
+        async function exportAudio() {
+            const blobs = Object.values(tracks).map(track => track.audioBlob).filter(blob => blob);
+            if (blobs.length === 0) {
+                alert("Nenhum áudio disponível para exportação.");
+                return;
+            }
+
+            try {
+                const audioBuffers = await Promise.all(
+                    blobs.map(async blob => {
+                        const arrayBuffer = await blob.arrayBuffer();
+                        return audioContext.decodeAudioData(arrayBuffer);
+                    })
+                );
+
+                const duration = Math.max(...audioBuffers.map(buf => buf.duration));
+                const offlineContext = new OfflineAudioContext(2, duration * audioContext.sampleRate, audioContext.sampleRate);
+
+                audioBuffers.forEach((buffer, index) => {
+                    const source = offlineContext.createBufferSource();
+                    source.buffer = buffer;
+                    const gainNode = offlineContext.createGain();
+                    gainNode.gain.value = tracks[Object.keys(tracks)[index]].volume;
+                    source.connect(gainNode);
+                    gainNode.connect(offlineContext.destination);
+                    source.start(0);
+                });
+
+                const renderedBuffer = await offlineContext.startRendering();
+                const wavBlob = bufferToWave(renderedBuffer, renderedBuffer.length);
+
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(wavBlob);
+                link.download = 'sequencia_audio.wav';
+                link.click();
+                addToWorkList('Exportação Completa', wavBlob);
+            } catch (err) {
+                console.error('Erro ao exportar:', err);
+                alert('Erro ao exportar o áudio: ' + err.message);
+            }
+        }
+
+        function bufferToWave(abuffer, len) {
+            let numOfChan = abuffer.numberOfChannels,
+                length = len * numOfChan * 2 + 44,
+                buffer = new ArrayBuffer(length),
+                view = new DataView(buffer),
+                channels = [], i, sample,
+                offset = 0,
+                pos = 0;
+
+            for (i = 0; i < abuffer.numberOfChannels; i++)
+                channels.push(abuffer.getChannelData(i));
+
+            const maxSamples = Math.min(...channels.map(ch => ch.length));
+
+            setUint32(0x46464952); // "RIFF"
+            setUint32(length - 8); // Tamanho do arquivo - 8
+            setUint32(0x45564157); // "WAVE"
+            setUint32(0x20746d66); // "fmt " chunk
+            setUint32(16); // Tamanho = 16
+            setUint16(1); // PCM (sem compressão)
+            setUint16(numOfChan);
+            setUint32(abuffer.sampleRate);
+            setUint32(abuffer.sampleRate * 2 * numOfChan); // Bytes por segundo
+            setUint16(numOfChan * 2); // Alinhamento de bloco
+            setUint16(16); // 16-bit
+            setUint32(0x61746164); // "data" chunk
+            setUint32(length - pos - 4); // Tamanho do chunk
+
+            while (pos < length && offset < maxSamples) {
+                for (i = 0; i < numOfChan; i++) {
+                    sample = Math.max(-1, Math.min(1, channels[i][offset]));
+                    sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+                    view.setInt16(pos, sample, true);
+                    pos += 2;
+                }
+                offset++;
+            }
+
+            return new Blob([buffer], { type: "audio/wav" });
+
+            function setUint16(data) {
+                view.setUint16(pos, data, true);
+                pos += 2;
+            }
+            function setUint32(data) {
+                view.setUint32(pos, data, true);
+                pos += 4;
+            }
+        }
+
+        function openRemasteringRoom() {
+            const room = document.getElementById('remastering-room');
+            room.style.display = 'block';
+
+            if (!remasteringWavesurfer) {
+                remasteringWavesurfer = WaveSurfer.create({
+                    container: '#remastering-waveform',
+                    waveColor: 'blue',
+                    progressColor: 'darkblue',
+                    height: 150,
+                    cursorColor: 'navy',
+                    barWidth: 2,
+                    normalize: true,
+                    audioContext: audioContext
+                });
+
+                remasteringWavesurfer.on('finish', () => {
+                    remasteringWavesurfer.stop();
+                });
+            }
+
+            updatePreview();
+        }
+
+        function closeRemasteringRoom() {
+            const room = document.getElementById('remastering-room');
+            room.style.display = 'none';
+            if (remasteringWavesurfer) {
+                remasteringWavesurfer.stop();
+            }
+            document.getElementById('status-text').textContent = 'Status: Aguardando ação';
+            previewBlob = null;
+        }
+
+        async function updatePreview() {
+            const blobs = Object.values(tracks).map(track => track.audioBlob).filter(blob => blob && blob.size > 0);
+            if (blobs.length === 0) {
+                document.getElementById('status-text').textContent = 'Status: Nenhum áudio válido disponível';
+                previewBlob = null;
+                remasteringWavesurfer.empty();
+                return;
+            }
+
+            try {
+                document.getElementById('status-text').textContent = 'Status: Gerando prévia...';
+                const audioBuffers = await Promise.all(
+                    blobs.map(async blob => {
+                        const arrayBuffer = await blob.arrayBuffer();
+                        return audioContext.decodeAudioData(arrayBuffer);
+                    })
+                );
+
+                const duration = Math.max(...audioBuffers.map(buf => buf.duration));
+                const offlineContext = new OfflineAudioContext(2, duration * audioContext.sampleRate, audioContext.sampleRate);
+
+                audioBuffers.forEach((buffer, index) => {
+                    const source = offlineContext.createBufferSource();
+                    source.buffer = buffer;
+                    const gainNode = offlineContext.createGain();
+                    gainNode.gain.value = tracks[Object.keys(tracks)[index]].volume;
+                    source.connect(gainNode);
+                    gainNode.connect(offlineContext.destination);
+                    source.start(0);
+                });
+
+                const renderedBuffer = await offlineContext.startRendering();
+                previewBlob = bufferToWave(renderedBuffer, renderedBuffer.length);
+
+                const previewUrl = URL.createObjectURL(previewBlob);
+                remasteringWavesurfer.load(previewUrl);
+                document.getElementById('status-text').textContent = 'Status: Prévia pronta';
+            } catch (err) {
+                console.error('Erro ao gerar prévia:', err);
+                document.getElementById('status-text').textContent = 'Status: Erro ao gerar prévia - ' + err.message;
+                previewBlob = null;
+                remasteringWavesurfer.empty();
+            }
+        }
+
+        function playPreview() {
+            if (remasteringWavesurfer && previewBlob) {
+                remasteringWavesurfer.play();
+            } else {
+                alert('Nenhum áudio disponível para prévia. Grave ou importe áudios primeiro e abra a sala novamente.');
+            }
+        }
+
+        function stopPreview() {
+            if (remasteringWavesurfer) {
+                remasteringWavesurfer.stop();
+            }
+        }
+
+        function cleanRemasteringRoom() {
+            if (remasteringWavesurfer) {
+                remasteringWavesurfer.empty();
+            }
+            previewBlob = null;
+            document.getElementById('status-text').textContent = 'Status: Sala limpa';
+        }
+
+        async function remasterWithAI() {
+            if (!previewBlob || previewBlob.size === 0) {
+                alert('Nenhum áudio combinado disponível. Grave ou importe áudios e abra a sala de remasterização para gerar a prévia primeiro.');
+                return;
+            }
+
+            document.getElementById('status-text').textContent = 'Status: Enviando para remasterização...';
+
+            try {
+                const arrayBuffer = await previewBlob.arrayBuffer();
+                ipcRenderer.send('remaster-audio', Buffer.from(arrayBuffer));
+
+                ipcRenderer.once('remaster-audio-reply', (event, result) => {
+                    if (result.error) {
+                        document.getElementById('status-text').textContent = 'Status: Erro - ' + result.error;
+                        alert('Erro ao remasterizar: ' + result.error);
+                        return;
+                    }
+
+                    const remasteredBlob = new Blob([result], { type: 'audio/wav' });
+                    const remasteredUrl = URL.createObjectURL(remasteredBlob);
+                    const track = addNewTrack();
+                    track.audioBlob = remasteredBlob;
+                    track.wavesurfer.load(remasteredUrl);
+
+                    addToWorkList('Remasterização Concluída', remasteredBlob);
+
+                    const link = document.createElement('a');
+                    link.href = remasteredUrl;
+                    link.download = 'remastered_audio.wav';
+                    link.click();
+
+                    document.getElementById('status-text').textContent = 'Status: Remasterização concluída!';
+                    alert('Remasterização concluída com sucesso! O áudio foi adicionado ao sequenciador.');
+                });
+            } catch (err) {
+                document.getElementById('status-text').textContent = 'Status: Erro - ' + err.message;
+                alert('Erro ao processar: ' + err.message);
+            }
+        }
+
+        function addToWorkList(name, blob) {
+            const timestamp = new Date().toLocaleString();
+            const url = URL.createObjectURL(blob);
+            workList.push({ name, timestamp, url });
+            updateWorkList();
+        }
+
+        function updateWorkList() {
+            const list = document.getElementById('work-list');
+            list.innerHTML = '';
+            workList.forEach((work, index) => {
+                const li = document.createElement('li');
+                li.innerHTML = `
+                    ${work.name} - ${work.timestamp}
+                    <button class="play-btn" onclick="playWork(${index})">Tocar</button>
+                `;
+                list.appendChild(li);
+            });
+        }
+
+        function playWork(index) {
+            const audio = new Audio(workList[index].url);
+            audio.play();
+        }
+
+        addNewTrack();
+    </script>
+</body>
+
+</html>
